@@ -65,12 +65,12 @@ public class ZoneRouterPackWriter {
         List<Integer> dataSizes = new ArrayList<>(produceRequests.size());
         for (ZoneRouterProduceRequest produceRequest : produceRequests) {
 
-            size += 2 /* api version */ + 4 /* data size */;
+            size += 2 /* api version */ + 2 /* flag */ + 4 /* data size */;
 
             ProduceRequestData data = produceRequest.data();
             ObjectSerializationCache objectSerializationCache = new ObjectSerializationCache();
             objectSerializationCaches.add(objectSerializationCache);
-            int dataSize = data.size(objectSerializationCache, (short) 11);
+            int dataSize = data.size(objectSerializationCache, produceRequest.apiVersion());
             dataSizes.add(dataSize);
             size += dataSize;
         }
@@ -83,8 +83,9 @@ public class ZoneRouterPackWriter {
             ObjectSerializationCache objectSerializationCache = objectSerializationCaches.get(i);
 
             buf.writeShort(produceRequest.apiVersion());
+            buf.writeShort(produceRequest.flag());
             buf.writeInt(dataSize);
-            data.write(new ByteBufferAccessor(buf.nioBuffer(buf.writerIndex(), dataSize)), objectSerializationCache, (short) 11);
+            data.write(new ByteBufferAccessor(buf.nioBuffer(buf.writerIndex(), dataSize)), objectSerializationCache, produceRequest.apiVersion());
             buf.writerIndex(buf.writerIndex() + dataSize);
         }
         return buf;

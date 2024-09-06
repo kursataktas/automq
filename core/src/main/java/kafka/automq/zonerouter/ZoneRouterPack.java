@@ -18,6 +18,9 @@ public class ZoneRouterPack {
     public static final int FOOTER_SIZE = 48;
     public static final long PACK_MAGIC = 0x88e241b785f4cff9L;
 
+    public static final String ZONE_ROUTER_CLIENT_ID = "__automq_zr";
+    public static final String ZONE_ROUTER_TOPIC = "__automq_zr";
+
     public static String genObjectPath(int nodeId, long objectId) {
         String pathPrefix = new StringBuilder(String.format("%08x", nodeId)).reverse().toString();
         return pathPrefix + "/" + ObjectUtils.getNamespace() + "/router/" + objectId;

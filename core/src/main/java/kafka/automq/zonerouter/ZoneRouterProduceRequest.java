@@ -16,15 +16,21 @@ import org.apache.kafka.common.message.ProduceRequestData;
 
 public class ZoneRouterProduceRequest {
     private final short apiVersion;
+    private final short flag;
     private final ProduceRequestData data;
 
-    public ZoneRouterProduceRequest(short apiVersion, ProduceRequestData data) {
+    public ZoneRouterProduceRequest(short apiVersion, short flag, ProduceRequestData data) {
         this.apiVersion = apiVersion;
         this.data = data;
+        this.flag = flag;
     }
 
     public short apiVersion() {
         return apiVersion;
+    }
+
+    public short flag() {
+        return flag;
     }
 
     public ProduceRequestData data() {
@@ -44,5 +50,37 @@ public class ZoneRouterProduceRequest {
     @Override
     public int hashCode() {
         return Objects.hash(apiVersion, data);
+    }
+
+    public static class Flag {
+        private static final short INTERNAL_TOPICS_ALLOWED = 1;
+
+        private short flag;
+
+        public Flag(short flag) {
+            this.flag = flag;
+        }
+
+        public Flag() {
+            this((short) 0);
+        }
+
+        public short value() {
+            return flag;
+        }
+
+        public Flag internalTopicsAllowed(boolean internalTopicsAllowed) {
+            if (internalTopicsAllowed) {
+                flag = (short) (flag | INTERNAL_TOPICS_ALLOWED);
+            } else {
+                flag = (short) (flag & ~INTERNAL_TOPICS_ALLOWED);
+            }
+            return this;
+        }
+
+        public boolean internalTopicsAllowed() {
+            return (flag & INTERNAL_TOPICS_ALLOWED) != 0;
+        }
+
     }
 }

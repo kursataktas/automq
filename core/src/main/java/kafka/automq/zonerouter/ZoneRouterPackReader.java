@@ -47,12 +47,13 @@ public class ZoneRouterPackReader {
         List<ZoneRouterProduceRequest> requests = new ArrayList<>();
         while (buf.readableBytes() > 0) {
             short apiVersion = buf.readShort();
+            short flag = buf.readShort();
             int dataSize = buf.readInt();
             ByteBuf dataBuf = buf.slice(buf.readerIndex(), dataSize);
             ProduceRequestData produceRequestData = new ProduceRequestData();
             produceRequestData.read(new ByteBufferAccessor(dataBuf.nioBuffer()), (short) 11);
             buf.skipBytes(dataSize);
-            requests.add(new ZoneRouterProduceRequest(apiVersion, produceRequestData));
+            requests.add(new ZoneRouterProduceRequest(apiVersion, flag, produceRequestData));
         }
         return requests;
     }

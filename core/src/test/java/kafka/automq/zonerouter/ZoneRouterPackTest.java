@@ -15,6 +15,7 @@ import io.netty.buffer.ByteBuf;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import kafka.automq.zonerouter.ZoneRouterProduceRequest.Flag;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.record.MemoryRecords;
@@ -42,7 +43,7 @@ public class ZoneRouterPackTest {
                     .setName("topic")
                     .setPartitionData(List.of(partitionProduceData)));
             requestData.setTopicData(produceData);
-            produceRequests.add(new ZoneRouterProduceRequest((short) 11, requestData));
+            produceRequests.add(new ZoneRouterProduceRequest((short) 11, new Flag().internalTopicsAllowed(true).value(), requestData));
         }
         ByteBuf buf = ZoneRouterPackWriter.encodeDataBlock(produceRequests);
         List<ZoneRouterProduceRequest> decoded = ZoneRouterPackReader.decodeDataBlock(buf);
