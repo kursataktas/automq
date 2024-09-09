@@ -121,11 +121,9 @@ public class DefaultProduceRouter implements ProduceRouter {
 
         public void afterRouter() {
             topicPartitions = new ArrayList<>();
-            data.topicData().forEach(topicData -> {
-                topicData.partitionData().forEach(partitionData -> {
-                    topicPartitions.add(new TopicPartition(topicData.name(), partitionData.index()));
-                });
-            });
+            data.topicData().forEach(topicData -> topicData.partitionData().forEach(partitionData -> {
+                topicPartitions.add(new TopicPartition(topicData.name(), partitionData.index()));
+            }));
             data = null; // gc the data
         }
     }
@@ -155,6 +153,7 @@ public class DefaultProduceRouter implements ProduceRouter {
             List<ProxyRequest> requests = new ArrayList<>();
             queue.drainTo(requests);
             node2requests.put(node, requests);
+            batchSize.addAndGet(-requests.stream().mapToInt(r -> r.size).sum());
         });
 
         long objectId = nextObjectId.incrementAndGet();
@@ -169,6 +168,7 @@ public class DefaultProduceRouter implements ProduceRouter {
                         .map(r -> new ZoneRouterProduceRequest(r.apiVersion, r.flag, r.data))
                         .collect(Collectors.toList())
                 );
+            requests.forEach(ProxyRequest::afterRouter);
             node2position.put(node, position);
         });
 
@@ -219,7 +219,7 @@ public class DefaultProduceRouter implements ProduceRouter {
             ));
             topic2partitionResponse.put(topicName, partitionResponses);
         });
-        for (ProxyRequest proxyRequest: proxyRequests) {
+        for (ProxyRequest proxyRequest : proxyRequests) {
             Map<TopicPartition, ProduceResponse.PartitionResponse> rst = new HashMap<>();
             proxyRequest.topicPartitions.forEach(topicPartition -> {
                 Queue<ProduceResponse.PartitionResponse> partitionResponses = topic2partitionResponse.get(topicPartition.topic());
@@ -228,7 +228,7 @@ public class DefaultProduceRouter implements ProduceRouter {
             });
             proxyRequest.cf.complete(rst);
         }
-        for (Map.Entry<String, Queue<ProduceResponse.PartitionResponse>> entry: topic2partitionResponse.entrySet()) {
+        for (Map.Entry<String, Queue<ProduceResponse.PartitionResponse>> entry : topic2partitionResponse.entrySet()) {
             if (!entry.getValue().isEmpty()) {
                 LOGGER.error("response partition not match request partition, topic={}", entry.getKey());
             }
@@ -247,7 +247,19 @@ public class DefaultProduceRouter implements ProduceRouter {
     ) {
         short flag = new Flag().internalTopicsAllowed(internalTopicsAllowed).value();
         Map<Node, ProxyRequest> requests = split(apiVersion, timeout, flag, requiredAcks, transactionId, entriesPerPartition);
-        // TODO: set request callback handle
+        Map<TopicPartition, ProduceResponse.PartitionResponse> rst = new ConcurrentHashMap<>();
+        CompletableFuture.allOf(
+            requests.values()
+                .stream()
+                .map(request ->
+                    request.cf
+                        .thenAccept(rst::putAll)
+                        .exceptionally(ex -> {
+                            LOGGER.error("[UNEXPECTED]", ex);
+                            return null;
+                        })
+                ).toArray(CompletableFuture[]::new)
+        ).thenAccept(nil -> responseCallback.accept(rst));
 
         requests.forEach((node, request) -> pendingRequests.compute(node, (n, queue) -> {
             if (queue == null) {
@@ -275,6 +287,7 @@ public class DefaultProduceRouter implements ProduceRouter {
         LOGGER.info("receive router request={}", entriesPerPartition);
         RouterRecord routerRecord = RouterRecord.decode(Unpooled.wrappedBuffer(entriesPerPartition.get(new TopicPartition(ZoneRouterPack.ZONE_ROUTER_TOPIC, 0)).records().iterator().next().value()));
 
+        // TODO: ensure the order
         new ZoneRouterPackReader(routerRecord.nodeId(), routerRecord.bucketId(), routerRecord.objectId(), objectStorage).readProduceRequests(new Position(routerRecord.position(), routerRecord.size())).thenAccept(produces -> {
             // TODO: write each produce request
             ZoneRouterProduceRequest zoneRouterProduceRequest = produces.get(0);
