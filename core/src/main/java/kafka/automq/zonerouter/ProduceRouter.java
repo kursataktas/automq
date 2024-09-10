@@ -12,27 +12,28 @@
 package kafka.automq.zonerouter;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
-import kafka.server.RequestLocal;
-import kafka.server.TransactionSupportedOperation;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.RecordValidationStats;
 import org.apache.kafka.common.requests.ProduceResponse;
+import org.apache.kafka.common.requests.s3.AutomqZoneRouterResponse;
 
 public interface ProduceRouter {
 
     void handleProduceAppend(
-        long timeout,
+        short apiVersion,
+        String clientId,
+        int timeout,
         short requiredAcks,
         boolean internalTopicsAllowed,
         String transactionId,
         Map<TopicPartition, MemoryRecords> entriesPerPartition,
         Consumer<Map<TopicPartition, ProduceResponse.PartitionResponse>> responseCallback,
-        Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback,
-        RequestLocal requestLocal,
-        TransactionSupportedOperation transactionSupportedOperation,
-        String clientId
+        Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
     );
+
+    CompletableFuture<AutomqZoneRouterResponse> handleZoneRouterRequest(byte[] metadata);
 
 }

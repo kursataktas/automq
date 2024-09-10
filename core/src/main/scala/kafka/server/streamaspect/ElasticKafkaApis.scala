@@ -26,6 +26,7 @@ import org.apache.kafka.common.record.{LazyDownConversionRecords, MemoryRecords,
 import org.apache.kafka.common.replica.ClientMetadata
 import org.apache.kafka.common.replica.ClientMetadata.DefaultClientMetadata
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
+import org.apache.kafka.common.requests.s3.AutomqZoneRouterRequest
 import org.apache.kafka.common.requests.{AbstractResponse, DeleteTopicsRequest, DeleteTopicsResponse, FetchRequest, FetchResponse, ProduceRequest, ProduceResponse, RequestUtils}
 import org.apache.kafka.common.resource.Resource.CLUSTER_NAME
 import org.apache.kafka.common.resource.ResourceType.{CLUSTER, TOPIC, TRANSACTIONAL_ID}
@@ -163,6 +164,7 @@ class ElasticKafkaApis(
       }
 
       request.header.apiKey match {
+        case ApiKeys.AUTOMQ_ZONE_ROUTER => handleZoneRouterRequest(request, requestLocal)
         case ApiKeys.DELETE_TOPICS => maybeForwardTopicDeletionToController(request, handleDeleteTopicsRequest)
         case ApiKeys.GET_NEXT_NODE_ID => forwardToControllerOrFail(request)
         case _ =>
@@ -189,7 +191,7 @@ class ElasticKafkaApis(
   override def handle(request: RequestChannel.Request,
     requestLocal: RequestLocal): Unit = {
     request.header.apiKey match {
-      case ApiKeys.DELETE_TOPICS | ApiKeys.GET_NEXT_NODE_ID => handleExtensionRequest(request, requestLocal)
+      case ApiKeys.DELETE_TOPICS | ApiKeys.GET_NEXT_NODE_ID | ApiKeys.AUTOMQ_ZONE_ROUTER => handleExtensionRequest(request, requestLocal)
       case _ => super.handle(request, requestLocal)
     }
   }
@@ -355,7 +357,6 @@ class ElasticKafkaApis(
       sendResponseCallback(Map.empty)
     else {
       val internalTopicsAllowed = request.header.clientId == AdminUtils.ADMIN_CLIENT_ID
-      val transactionSupportedOperation = if (request.header.apiVersion > 10) genericError else defaultError
 
       def sendResponseCallbackJava(rst: util.Map[TopicPartition, PartitionResponse]): Unit = {
         info(s"sendResponseCallbackJava $rst")
@@ -367,16 +368,15 @@ class ElasticKafkaApis(
       }
 
       produceRouter.handleProduceAppend(
-        produceRequest.timeout.toLong,
+        request.header.apiVersion,
+        request.header.clientId,
+        produceRequest.timeout.toInt,
         produceRequest.acks,
         internalTopicsAllowed,
         produceRequest.transactionalId,
         authorizedRequestInfo.asJava,
         sendResponseCallbackJava,
         processingStatsCallbackJava,
-        requestLocal,
-        transactionSupportedOperation,
-        request.header.clientId
       )
 
       // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
@@ -389,6 +389,13 @@ class ElasticKafkaApis(
   }
 
   val produceRouter = new DefaultProduceRouter(this, metadataCache, config, ObjectStorageFactory.instance().builder(BucketURI.parse("0@s3://ko3?region=us-east-1&endpoint=http://127.0.0.1:4566")).build())
+
+  def handleZoneRouterRequest(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
+    val zoneRouterRequest = request.body.asInstanceOf[AutomqZoneRouterRequest]
+    produceRouter.handleZoneRouterRequest(zoneRouterRequest.data().metadata()).thenAccept(response => {
+      requestChannel.sendResponse(request, response, None)
+    })
+  }
 
   def handleProduceAppendJavaCompatible(timeout: Long,
     requiredAcks: Short,
