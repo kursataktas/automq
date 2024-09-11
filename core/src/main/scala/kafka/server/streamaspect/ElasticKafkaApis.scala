@@ -391,7 +391,7 @@ class ElasticKafkaApis(
   val produceRouter = new DefaultProduceRouter(this, metadataCache, config, ObjectStorageFactory.instance().builder(BucketURI.parse("0@s3://ko3?region=us-east-1&endpoint=http://127.0.0.1:4566")).build())
 
   def handleZoneRouterRequest(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
-    val zoneRouterRequest = request.body.asInstanceOf[AutomqZoneRouterRequest]
+    val zoneRouterRequest = request.body[AutomqZoneRouterRequest]
     produceRouter.handleZoneRouterRequest(zoneRouterRequest.data().metadata()).thenAccept(response => {
       requestChannel.sendResponse(request, response, None)
     })

@@ -63,7 +63,7 @@ public class RouterRecord {
 
     public static RouterRecord decode(ByteBuf buf) {
         buf = buf.slice();
-        short magic = buf.readShort();
+        byte magic = buf.readByte();
         if (magic != MAGIC) {
             throw new IllegalArgumentException("Invalid magic byte: " + magic);
         }

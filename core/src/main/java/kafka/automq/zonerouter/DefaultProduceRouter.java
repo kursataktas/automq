@@ -13,7 +13,6 @@ package kafka.automq.zonerouter;
 
 import com.automq.stream.s3.operator.ObjectStorage;
 import com.automq.stream.utils.Threads;
-import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -25,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -40,7 +40,6 @@ import org.apache.kafka.common.message.AutomqZoneRouterRequestData;
 import org.apache.kafka.common.message.AutomqZoneRouterResponseData;
 import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.message.ProduceResponseData;
-import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.RecordValidationStats;
@@ -166,18 +165,30 @@ public class DefaultProduceRouter implements ProduceRouter {
             }
         }
 
+        private final Semaphore semaphore = new Semaphore(1);
+
         private void proxy0() {
             if (batchSize.get() < batchSizeThreshold && time.milliseconds() - batchIntervalMs < lastUploadTimestamp) {
                 return;
             }
+
             lastUploadTimestamp = time.milliseconds();
             Map<Node, List<ProxyRequest>> node2requests = new HashMap<>();
             pendingRequests.forEach((node, queue) -> {
                 List<ProxyRequest> requests = new ArrayList<>();
                 queue.drainTo(requests);
-                node2requests.put(node, requests);
-                batchSize.addAndGet(-requests.stream().mapToInt(r -> r.size).sum());
+                if (!requests.isEmpty()) {
+                    node2requests.put(node, requests);
+                    batchSize.addAndGet(-requests.stream().mapToInt(r -> r.size).sum());
+                }
             });
+            if (node2requests.isEmpty()) {
+                return;
+            }
+
+            if (!semaphore.tryAcquire()) {
+                return;
+            }
 
             long objectId = nextObjectId.incrementAndGet();
             LOGGER.info("try write s3 objectId={}", objectId);
@@ -197,6 +208,7 @@ public class DefaultProduceRouter implements ProduceRouter {
 
             writer.close().thenAccept(nil -> {
                 LOGGER.info("write s3 objectId={}", objectId);
+                semaphore.release();
                 node2position.forEach((node, position) -> {
                     RouterRecord routerRecord = new RouterRecord(kafkaConfig.nodeId(), (short) 0, objectId, position.position(), position.size());
 
@@ -231,11 +243,8 @@ public class DefaultProduceRouter implements ProduceRouter {
             for (int i = 0; i < proxyRequests.size(); i++) {
                 ProxyRequest proxyRequest = proxyRequests.get(i);
                 AutomqZoneRouterResponseData.Response response = responses.get(i);
-                ProduceResponseData produceResponseData = new ProduceResponseData();
-                ByteBuf buf = Unpooled.wrappedBuffer(response.data());
-                buf.readShort(); // magic
-                short version = buf.readShort();
-                produceResponseData.read(new ByteBufferAccessor(Unpooled.wrappedBuffer(response.data()).nioBuffer()), version);
+                ProduceResponseData produceResponseData = ZoneRouterResponseCodec.decode(Unpooled.wrappedBuffer(response.data()));
+                response.setData(null); // gc the data
                 Map<TopicPartition, ProduceResponse.PartitionResponse> rst = new HashMap<>();
                 produceResponseData.responses().forEach(topicData -> {
                     topicData.partitionResponses().forEach(partitionData -> {
@@ -326,6 +335,7 @@ public class DefaultProduceRouter implements ProduceRouter {
     class RouterIn {
 
         public CompletableFuture<AutomqZoneRouterResponse> handleZoneRouterRequest(byte[] metadata) {
+            // TODO: handle any unexpected exception
             RouterRecord routerRecord = RouterRecord.decode(Unpooled.wrappedBuffer(metadata));
             LOGGER.info("receive router request={}", routerRecord);
             // TODO: ensure the order

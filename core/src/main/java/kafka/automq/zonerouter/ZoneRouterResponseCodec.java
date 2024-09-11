@@ -28,7 +28,7 @@ public class ZoneRouterResponseCodec {
         buf.writeByte(PRODUCE_RESPONSE_BLOCK_MAGIC);
         buf.writeShort(version);
         produceResponseData.write(new ByteBufferAccessor(buf.nioBuffer(buf.writerIndex(), size)), objectSerializationCache, version);
-        buf.skipBytes(size);
+        buf.writerIndex(buf.writerIndex() + size);
         return buf;
     }
 
