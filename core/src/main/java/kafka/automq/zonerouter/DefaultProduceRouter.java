@@ -96,6 +96,7 @@ public class DefaultProduceRouter implements ProduceRouter {
         Consumer<Map<TopicPartition, ProduceResponse.PartitionResponse>> responseCallback,
         Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
     ) {
+        // 通过 clientid 判断走什么模式
         routerOut.handleProduceAppendProxy(timeout, apiVersion, requiredAcks, internalTopicsAllowed, transactionId, entriesPerPartition, responseCallback, recordValidationStatsCallback);
     }
 
@@ -118,6 +119,7 @@ public class DefaultProduceRouter implements ProduceRouter {
 
     class RouterOut {
         private final Map<Node, BlockingQueue<ProxyRequest>> pendingRequests = new ConcurrentHashMap<>();
+        private CompletableFuture<Void> lastRouterCf = CompletableFuture.completedFuture(null);
         private final AtomicInteger batchSize = new AtomicInteger();
         private long lastUploadTimestamp = 0;
 
@@ -165,8 +167,6 @@ public class DefaultProduceRouter implements ProduceRouter {
             }
         }
 
-        private final Semaphore semaphore = new Semaphore(1);
-
         private void proxy0() {
             if (batchSize.get() < batchSizeThreshold && time.milliseconds() - batchIntervalMs < lastUploadTimestamp) {
                 return;
@@ -186,10 +186,6 @@ public class DefaultProduceRouter implements ProduceRouter {
                 return;
             }
 
-            if (!semaphore.tryAcquire()) {
-                return;
-            }
-
             long objectId = nextObjectId.incrementAndGet();
             LOGGER.info("try write s3 objectId={}", objectId);
             ZoneRouterPackWriter writer = new ZoneRouterPackWriter(kafkaConfig.nodeId(), objectId, objectStorage);
@@ -206,35 +202,39 @@ public class DefaultProduceRouter implements ProduceRouter {
                 node2position.put(node, position);
             });
 
-            writer.close().thenAccept(nil -> {
-                LOGGER.info("write s3 objectId={}", objectId);
-                semaphore.release();
-                node2position.forEach((node, position) -> {
-                    RouterRecord routerRecord = new RouterRecord(kafkaConfig.nodeId(), (short) 0, objectId, position.position(), position.size());
+            CompletableFuture<Void> writeCf = writer.close();
+            lastRouterCf = writeCf
+                // Orderly send the router request.
+                .thenCompose(nil -> lastRouterCf)
+                .thenAccept(nil -> {
+                    LOGGER.info("write s3 objectId={}", objectId);
+                    node2position.forEach((node, position) -> {
+                        RouterRecord routerRecord = new RouterRecord(kafkaConfig.nodeId(), (short) 0, objectId, position.position(), position.size());
 
-                    AutomqZoneRouterRequest.Builder builder = new AutomqZoneRouterRequest.Builder(
-                        new AutomqZoneRouterRequestData().setMetadata(routerRecord.encode().array())
-                    );
-                    List<ProxyRequest> proxyRequests = node2requests.get(node);
-                    asyncSender.sendRequest(node, builder).thenAccept(clientResponse -> {
-                        LOGGER.info("receive router response={}", clientResponse);
-                        if (!clientResponse.hasResponse()) {
-                            LOGGER.error("has no response cause by other error");
+                        AutomqZoneRouterRequest.Builder builder = new AutomqZoneRouterRequest.Builder(
+                            new AutomqZoneRouterRequestData().setMetadata(routerRecord.encode().array())
+                        );
+                        List<ProxyRequest> proxyRequests = node2requests.get(node);
+                        asyncSender.sendRequest(node, builder).thenAccept(clientResponse -> {
+                            LOGGER.info("receive router response={}", clientResponse);
+                            if (!clientResponse.hasResponse()) {
+                                LOGGER.error("has no response cause by other error");
+                                // TODO: callback the error
+                                return;
+                            }
+                            AutomqZoneRouterResponse zoneRouterResponse = (AutomqZoneRouterResponse) clientResponse.responseBody();
+                            handleRouterResponse(zoneRouterResponse, proxyRequests);
+                        }).exceptionally(ex -> {
                             // TODO: callback the error
-                            return;
-                        }
-                        AutomqZoneRouterResponse zoneRouterResponse = (AutomqZoneRouterResponse) clientResponse.responseBody();
-                        handleRouterResponse(zoneRouterResponse, proxyRequests);
-                    }).exceptionally(ex -> {
-                        // TODO: callback the error
-                        LOGGER.error("[UNEXPECTED]", ex);
-                        return null;
+                            LOGGER.error("[UNEXPECTED]", ex);
+                            return null;
+                        });
                     });
+                })
+                .exceptionally(ex -> {
+                    LOGGER.error("[UNEXPECTED]", ex);
+                    return null;
                 });
-            }).exceptionally(ex -> {
-                LOGGER.error("[UNEXPECTED]", ex);
-                return null;
-            });
         }
 
         private void handleRouterResponse(AutomqZoneRouterResponse zoneRouterResponse,
