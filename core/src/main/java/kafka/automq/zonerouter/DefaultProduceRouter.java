@@ -96,6 +96,13 @@ public class DefaultProduceRouter implements ProduceRouter {
         Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
     ) {
         if (clientId.contains(ClientIdKey.AVAILABILITY_ZONE)) {
+            // 也需要识别 topicpartition，看是否需要返回 NotLeaderOrFollower
+            // 如果分区调度感知不及时的话，就会产生很多的 GET API 调用。
+            // 首先 metadata 查询成本高么?
+            // 可以先查询 metadata，然后根据自己是否 proxy 对应的 node 来决策是否返回 not leader or follower
+            // 另外一种方式，查询缓存，如果缓存里面没有则查询 metadata =》然后缓存结果 =》然后再监听后续的 metadata 变化 + 当前 proxy 负责的节点，更新缓存结果。
+            // 由于路由的正确性，大多数都是能匹配的，只有少部分会走到 ‘慢’ 路径
+
             // If it's a rack-aware producer.
             routerOut.handleProduceAppendProxy(timeout, apiVersion, requiredAcks, internalTopicsAllowed, transactionId, entriesPerPartition, responseCallback, recordValidationStatsCallback);
         } else {
