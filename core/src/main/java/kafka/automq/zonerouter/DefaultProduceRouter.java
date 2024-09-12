@@ -24,7 +24,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -203,9 +202,10 @@ public class DefaultProduceRouter implements ProduceRouter {
             });
 
             CompletableFuture<Void> writeCf = writer.close();
+            CompletableFuture<Void> prevLastRouterCf = lastRouterCf;
             lastRouterCf = writeCf
                 // Orderly send the router request.
-                .thenCompose(nil -> lastRouterCf)
+                .thenCompose(nil -> prevLastRouterCf)
                 .thenAccept(nil -> {
                     LOGGER.info("write s3 objectId={}", objectId);
                     node2position.forEach((node, position) -> {
