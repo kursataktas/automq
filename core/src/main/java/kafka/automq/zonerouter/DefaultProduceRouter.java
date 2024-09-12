@@ -95,8 +95,27 @@ public class DefaultProduceRouter implements ProduceRouter {
         Consumer<Map<TopicPartition, ProduceResponse.PartitionResponse>> responseCallback,
         Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
     ) {
-        // 通过 clientid 判断走什么模式
-        routerOut.handleProduceAppendProxy(timeout, apiVersion, requiredAcks, internalTopicsAllowed, transactionId, entriesPerPartition, responseCallback, recordValidationStatsCallback);
+        if (clientId.contains(ClientIdKey.AVAILABILITY_ZONE)) {
+            // If it's a rack-aware producer.
+            routerOut.handleProduceAppendProxy(timeout, apiVersion, requiredAcks, internalTopicsAllowed, transactionId, entriesPerPartition, responseCallback, recordValidationStatsCallback);
+        } else {
+            kafkaApis.handleProduceAppendJavaCompatible(
+                timeout,
+                requiredAcks,
+                internalTopicsAllowed,
+                transactionId,
+                entriesPerPartition,
+                rst -> {
+                    responseCallback.accept(rst);
+                    return null;
+                },
+                rst -> {
+                    recordValidationStatsCallback.accept(rst);
+                    return null;
+                },
+                apiVersion
+            );
+        }
     }
 
     @Override
