@@ -90,7 +90,10 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             new LogContext()
         );
         this.objectStorage = objectStorage;
-        this.currentRack = kafkaConfig.rack().getOrElse(() -> null);
+        if (kafkaConfig.rack().isEmpty()) {
+            throw new IllegalArgumentException("The node rack should be set when enable cross available zone router");
+        }
+        this.currentRack = kafkaConfig.rack().get();
     }
 
     @Override
@@ -106,7 +109,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
         Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
     ) {
         if (clientId.rack() != null) {
-            routerOut.handleProduceAppendProxy(timeout, apiVersion, requiredAcks, internalTopicsAllowed, transactionId, entriesPerPartition, responseCallback, recordValidationStatsCallback);
+            routerOut.handleProduceAppendProxy(timeout, apiVersion, clientId, requiredAcks, internalTopicsAllowed, transactionId, entriesPerPartition, responseCallback, recordValidationStatsCallback);
         } else {
             kafkaApis.handleProduceAppendJavaCompatible(
                 timeout,
@@ -164,29 +167,35 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             this.interBrokerListenerName = kafkaConfig.interBrokerListenerName().value();
         }
 
-        public Node getRouteOutNode(String topicName, int partition) {
+        public Node getRouteOutNode(String topicName, int partition, ClientIdMetadata clientId) {
             BrokerRegistration target = metadataCache.getPartitionLeaderNode(topicName, partition);
             Node currentNode = currentNode();
             if (target == null) {
                 return currentNode;
             }
-
-
-            // 如果自己的 rack 为 null, client 设置了 rack => 自己必须要设置 rack
-            // router r
-
-            if (Objects.equals(currentRack, target.rack().orElse(null))) {
-                // Direct write to the current node.
-                // If the current node isn't responsible for the partition, it will return NOT_LEADER_OR_FOLLOWER.
-                return currentNode;
+            String clientRack = clientId.rack();
+            if (clientRack == null) {
+                return target.node(interBrokerListenerName).orElse(Node.noNode());
             }
-            target = main2proxy.get(target.id());
-            if (target == null || target.id() != currentNode.id()) {
-                // The current node is not the proxy node of the target node.
-                // The current node will return NOT_LEADER_OR_FOLLOWER, and the producer will update metadata.
-                return currentNode;
+
+            if (Objects.equals(clientRack, currentRack) || !main2proxyByRack.containsKey(clientRack)) {
+                if (Objects.equals(currentRack, target.rack().orElse(null))) {
+                    if (target.id() == currentNode.id()) {
+                        return currentNode;
+                    } else {
+                        // The producer should refresh metadata and send to another node in the same rack
+                        return Node.noNode();
+                    }
+                } else {
+                    target = main2proxy.get(target.id());
+                    if (target == null) {
+                        return Node.noNode();
+                    }
+                    return target.node(interBrokerListenerName).orElse(Node.noNode());
+                }
+            } else {
+                return Node.noNode();
             }
-            return target.node(interBrokerListenerName).orElse(currentNode);
         }
 
         public Optional<Node> getLeaderNode(TopicPartition topicPartition, ClientIdMetadata clientId,
@@ -199,6 +208,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             if (clientRack == null) {
                 return target.node(listenerName);
             }
+
             Map<Integer, BrokerRegistration> clientRackMain2proxy = main2proxyByRack.get(clientRack);
             if (clientRackMain2proxy == null) {
                 // Cluster doesn't cover the client rack
@@ -263,6 +273,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
         public void handleProduceAppendProxy(
             int timeout,
             short apiVersion,
+            ClientIdMetadata clientId,
             short requiredAcks,
             boolean internalTopicsAllowed,
             String transactionId,
@@ -271,7 +282,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
         ) {
             short flag = new Flag().internalTopicsAllowed(internalTopicsAllowed).value();
-            Map<Node, ProxyRequest> requests = split(apiVersion, timeout, flag, requiredAcks, transactionId, entriesPerPartition);
+            Map<Node, ProxyRequest> requests = split(apiVersion, clientId, timeout, flag, requiredAcks, transactionId, entriesPerPartition);
             Map<TopicPartition, ProduceResponse.PartitionResponse> rst = new ConcurrentHashMap<>();
             CompletableFuture.allOf(
                 requests.values()
@@ -286,16 +297,22 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
                     ).toArray(CompletableFuture[]::new)
             ).thenAccept(nil -> responseCallback.accept(rst));
 
-            requests.forEach((node, request) -> pendingRequests.compute(node, (n, queue) -> {
-                if (queue == null) {
-                    queue = new LinkedBlockingQueue<>();
+            requests.forEach((node, request) -> {
+                if (node.id() == Node.noNode().id()) {
+                    request.completeWithNotLeaderNotFollower();
+                    return;
                 }
-                queue.add(request);
-                return queue;
-            }));
-            // TODO: if the node is current node, then handle it directly
-            int size = requests.values().stream().mapToInt(r -> r.size).sum();
-            if (batchSize.addAndGet(size) >= batchSizeThreshold || time.milliseconds() - batchIntervalMs >= lastUploadTimestamp) {
+                // TODO: if the node is current node, then handle it directly
+                pendingRequests.compute(node, (n, queue) -> {
+                    if (queue == null) {
+                        queue = new LinkedBlockingQueue<>();
+                    }
+                    queue.add(request);
+                    batchSize.addAndGet(request.size);
+                    return queue;
+                });
+            });
+            if (batchSize.get() >= batchSizeThreshold || time.milliseconds() - batchIntervalMs >= lastUploadTimestamp) {
                 scheduler.submit(this::proxy0);
             }
         }
@@ -401,6 +418,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
 
         private Map<Node, ProxyRequest> split(
             short apiVersion,
+            ClientIdMetadata clientId,
             int timeout,
             short requiredAcks,
             short flag,
@@ -410,7 +428,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             AtomicInteger size = new AtomicInteger();
             Map<Node, List<Map.Entry<TopicPartition, MemoryRecords>>> node2Entries = new HashMap<>();
             entriesPerPartition.forEach((tp, records) -> {
-                Node node = mapping.getRouteOutNode(tp.topic(), tp.partition());
+                Node node = mapping.getRouteOutNode(tp.topic(), tp.partition(), clientId);
                 node2Entries.compute(node, (n, list) -> {
                     if (list == null) {
                         list = new ArrayList<>();
@@ -546,6 +564,12 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
                 topicPartitions.add(new TopicPartition(topicData.name(), partitionData.index()));
             }));
             data = null; // gc the data
+        }
+
+        public void completeWithNotLeaderNotFollower() {
+            Map<TopicPartition, ProduceResponse.PartitionResponse> rst = new HashMap<>();
+            topicPartitions.forEach(tp -> rst.put(tp, new ProduceResponse.PartitionResponse(Errors.NOT_LEADER_OR_FOLLOWER, -1, -1, -1, -1, Collections.emptyList(), "")));
+            cf.complete(rst);
         }
     }
 
