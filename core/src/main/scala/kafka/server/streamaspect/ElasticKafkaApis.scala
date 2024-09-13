@@ -3,7 +3,7 @@ package kafka.server.streamaspect
 import com.automq.stream.s3.metrics.TimerUtil
 import com.automq.stream.s3.operator.{BucketURI, ObjectStorageFactory}
 import com.yammer.metrics.core.Histogram
-import kafka.automq.zonerouter.DefaultProduceRouter
+import kafka.automq.zonerouter.{ClientIdMetadata, DefaultProduceRouter}
 import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.log.streamaspect.ElasticLogManager
 import kafka.metrics.KafkaMetricsUtil
@@ -20,7 +20,7 @@ import org.apache.kafka.common.errors.{ApiException, UnsupportedCompressionTypeE
 import org.apache.kafka.common.internals.FatalExitError
 import org.apache.kafka.common.message.{DeleteTopicsRequestData, FetchResponseData}
 import org.apache.kafka.common.metrics.Metrics
-import org.apache.kafka.common.network.{NetworkSend, Send}
+import org.apache.kafka.common.network.{ListenerName, NetworkSend, Send}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.record.{LazyDownConversionRecords, MemoryRecords, MultiRecordsSend, PooledResource, RecordBatch, RecordValidationStats}
 import org.apache.kafka.common.replica.ClientMetadata
@@ -46,6 +46,7 @@ import java.util.stream.IntStream
 import scala.annotation.nowarn
 import scala.collection.{Map, Seq, mutable}
 import scala.jdk.CollectionConverters.{CollectionHasAsScala, MapHasAsJava, MapHasAsScala, SeqHasAsJava}
+import scala.jdk.javaapi.OptionConverters
 
 object ElasticKafkaApis {
   val metricsGroup = new KafkaMetricsGroup(this.getClass)
@@ -196,6 +197,21 @@ class ElasticKafkaApis(
     }
   }
 
+  protected def getCurrentLeaderForProduce(tp: TopicPartition, clientIdMetadata: ClientIdMetadata, ln: ListenerName): LeaderNode = {
+    val partitionInfoOrError = replicaManager.getPartitionOrError(tp)
+    val (leaderId, leaderEpoch) = partitionInfoOrError match {
+      case Right(x) =>
+        (x.leaderReplicaIdOpt.getOrElse(-1), x.getLeaderEpoch)
+      case Left(x) =>
+        debug(s"Unable to retrieve local leaderId and Epoch with error $x, falling back to metadata cache")
+        metadataCache.getPartitionInfo(tp.topic, tp.partition) match {
+          case Some(pinfo) => (pinfo.leader(), pinfo.leaderEpoch())
+          case None => (-1, -1)
+        }
+    }
+    LeaderNode(leaderId, leaderEpoch, OptionConverters.toScala(produceRouter.getLeaderNode(tp, clientIdMetadata, ln.value())))
+  }
+
   /**
    * Handle a produce request
    */
@@ -242,6 +258,8 @@ class ElasticKafkaApis(
         }
     })
 
+    val clientIdMetadata = ClientIdMetadata.of(request.header.clientId())
+
     // the callback for sending a produce response
     // The construction of ProduceResponse is able to accept auto-generated protocol data so
     // KafkaApis#handleProduceRequest should apply auto-generated protocol to avoid extra conversion.
@@ -267,7 +285,7 @@ class ElasticKafkaApis(
           if (request.header.apiVersion >= 10) {
             status.error match {
               case Errors.NOT_LEADER_OR_FOLLOWER =>
-                val leaderNode = getCurrentLeader(topicPartition, request.context.listenerName)
+                val leaderNode = getCurrentLeaderForProduce(topicPartition, clientIdMetadata, request.context.listenerName)
                 leaderNode.node.foreach { node =>
                   nodeEndpoints.put(node.id(), node)
                 }
@@ -369,8 +387,8 @@ class ElasticKafkaApis(
 
       produceRouter.handleProduceAppend(
         request.header.apiVersion,
-        request.header.clientId,
-        produceRequest.timeout.toInt,
+        clientIdMetadata,
+        produceRequest.timeout,
         produceRequest.acks,
         internalTopicsAllowed,
         produceRequest.transactionalId,

@@ -16,9 +16,12 @@ import com.automq.stream.utils.Threads;
 import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,12 +50,16 @@ import org.apache.kafka.common.requests.s3.AutomqZoneRouterRequest;
 import org.apache.kafka.common.requests.s3.AutomqZoneRouterResponse;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.image.MetadataDelta;
+import org.apache.kafka.image.MetadataImage;
+import org.apache.kafka.image.loader.MetadataListener;
+import org.apache.kafka.metadata.BrokerRegistration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.Option;
 
-public class DefaultProduceRouter implements ProduceRouter {
+public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
     private static final Logger LOGGER = LoggerFactory.getLogger(DefaultProduceRouter.class);
+    private static final String NOOP_RACK = "";
     private final ScheduledExecutorService scheduler = Threads.newSingleThreadScheduledExecutor("router", true, LOGGER);
     private final ElasticKafkaApis kafkaApis;
     private final MetadataCache metadataCache;
@@ -62,9 +69,11 @@ public class DefaultProduceRouter implements ProduceRouter {
 
     private final AtomicLong nextObjectId = new AtomicLong();
     private volatile Node node;
+    private final String currentRack;
     private int batchSizeThreshold = 4 * 1024 * 1024;
     private int batchIntervalMs = 100;
     private final Time time = Time.SYSTEM;
+    private final ProxyNodeMapping mapping = new ProxyNodeMapping();
     private final RouterOut routerOut = new RouterOut();
     private final RouterIn routerIn = new RouterIn();
 
@@ -81,12 +90,13 @@ public class DefaultProduceRouter implements ProduceRouter {
             new LogContext()
         );
         this.objectStorage = objectStorage;
+        this.currentRack = kafkaConfig.rack().getOrElse(() -> null);
     }
 
     @Override
     public void handleProduceAppend(
         short apiVersion,
-        String clientId,
+        ClientIdMetadata clientId,
         int timeout,
         short requiredAcks,
         boolean internalTopicsAllowed,
@@ -95,15 +105,7 @@ public class DefaultProduceRouter implements ProduceRouter {
         Consumer<Map<TopicPartition, ProduceResponse.PartitionResponse>> responseCallback,
         Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
     ) {
-        if (clientId.contains(ClientIdKey.AVAILABILITY_ZONE)) {
-            // 也需要识别 topicpartition，看是否需要返回 NotLeaderOrFollower
-            // 如果分区调度感知不及时的话，就会产生很多的 GET API 调用。
-            // 首先 metadata 查询成本高么?
-            // 可以先查询 metadata，然后根据自己是否 proxy 对应的 node 来决策是否返回 not leader or follower
-            // 另外一种方式，查询缓存，如果缓存里面没有则查询 metadata =》然后缓存结果 =》然后再监听后续的 metadata 变化 + 当前 proxy 负责的节点，更新缓存结果。
-            // 由于路由的正确性，大多数都是能匹配的，只有少部分会走到 ‘慢’ 路径
-
-            // If it's a rack-aware producer.
+        if (clientId.rack() != null) {
             routerOut.handleProduceAppendProxy(timeout, apiVersion, requiredAcks, internalTopicsAllowed, transactionId, entriesPerPartition, responseCallback, recordValidationStatsCallback);
         } else {
             kafkaApis.handleProduceAppendJavaCompatible(
@@ -130,15 +132,121 @@ public class DefaultProduceRouter implements ProduceRouter {
         return routerIn.handleZoneRouterRequest(metadata);
     }
 
+    @Override
+    public Optional<Node> getLeaderNode(TopicPartition topicPartition, ClientIdMetadata clientId,
+        String listenerName) {
+        return mapping.getLeaderNode(topicPartition, clientId, listenerName);
+    }
+
     private Node currentNode() {
         if (node != null) {
             return node;
         }
         synchronized (this) {
             if (node == null) {
-                node = metadataCache.getAliveBrokerNode(kafkaConfig.nodeId(), kafkaConfig.interBrokerListenerName()).get();
+                node = metadataCache.getNode(kafkaConfig.nodeId()).node(kafkaConfig.interBrokerListenerName().value()).get();
             }
             return node;
+        }
+    }
+
+    @Override
+    public void onChange(MetadataDelta delta, MetadataImage image) {
+        mapping.onChange(delta, image);
+    }
+
+    class ProxyNodeMapping implements MetadataListener {
+        private volatile Map<Integer, BrokerRegistration> main2proxy = new HashMap<>();
+        private volatile Map<String, Map<Integer, BrokerRegistration>> main2proxyByRack = new HashMap<>();
+        private final String interBrokerListenerName;
+
+        public ProxyNodeMapping() {
+            this.interBrokerListenerName = kafkaConfig.interBrokerListenerName().value();
+        }
+
+        public Node getRouteOutNode(String topicName, int partition) {
+            BrokerRegistration target = metadataCache.getPartitionLeaderNode(topicName, partition);
+            Node currentNode = currentNode();
+            if (target == null) {
+                return currentNode;
+            }
+
+
+            // 如果自己的 rack 为 null, client 设置了 rack => 自己必须要设置 rack
+            // router r
+
+            if (Objects.equals(currentRack, target.rack().orElse(null))) {
+                // Direct write to the current node.
+                // If the current node isn't responsible for the partition, it will return NOT_LEADER_OR_FOLLOWER.
+                return currentNode;
+            }
+            target = main2proxy.get(target.id());
+            if (target == null || target.id() != currentNode.id()) {
+                // The current node is not the proxy node of the target node.
+                // The current node will return NOT_LEADER_OR_FOLLOWER, and the producer will update metadata.
+                return currentNode;
+            }
+            return target.node(interBrokerListenerName).orElse(currentNode);
+        }
+
+        public Optional<Node> getLeaderNode(TopicPartition topicPartition, ClientIdMetadata clientId,
+            String listenerName) {
+            BrokerRegistration target = metadataCache.getPartitionLeaderNode(topicPartition.topic(), topicPartition.partition());
+            if (target == null) {
+                return Optional.empty();
+            }
+            String clientRack = clientId.rack();
+            if (clientRack == null) {
+                return target.node(listenerName);
+            }
+            Map<Integer, BrokerRegistration> clientRackMain2proxy = main2proxyByRack.get(clientRack);
+            if (clientRackMain2proxy == null) {
+                // Cluster doesn't cover the client rack
+                return target.node(listenerName);
+            }
+            BrokerRegistration proxy = clientRackMain2proxy.get(target.id());
+            if (proxy == null) {
+                return target.node(listenerName);
+            }
+            return proxy.node(listenerName);
+        }
+
+        @Override
+        public void onChange(MetadataDelta delta, MetadataImage image) {
+            if (delta.clusterDelta() == null || delta.clusterDelta().changedBrokers().isEmpty()) {
+                return;
+            }
+            // categorize the brokers by rack
+            Map<String, List<BrokerRegistration>> rack2brokers = new HashMap<>();
+            image.cluster().brokers().forEach((nodeId, node) -> rack2brokers.compute(node.rack().orElse(NOOP_RACK), (rack, list) -> {
+                if (list == null) {
+                    list = new ArrayList<>();
+                }
+                list.add(node);
+                return list;
+            }));
+
+            rack2brokers.forEach((rack, brokers) -> brokers.sort(Comparator.comparingInt(BrokerRegistration::id)));
+            Map<String, Map<Integer, BrokerRegistration>> newMain2proxyByRack = new HashMap<>();
+
+            rack2brokers.keySet().forEach(proxyRack -> {
+                // TODO: replace with consistent hash allocation and consider the node weight
+                Map<Integer, BrokerRegistration> newMain2proxy = new HashMap<>();
+                List<BrokerRegistration> proxyRackBrokers = rack2brokers.get(proxyRack);
+                rack2brokers.forEach((rack, brokers) -> {
+                    if (Objects.equals(rack, proxyRack)) {
+                        return;
+                    }
+                    for (int i = 0; i < brokers.size(); i++) {
+                        BrokerRegistration node = brokers.get(i);
+                        newMain2proxy.put(node.id(), proxyRackBrokers.get(i % proxyRackBrokers.size()));
+                    }
+                });
+                newMain2proxyByRack.put(proxyRack, newMain2proxy);
+            });
+
+            this.main2proxy = newMain2proxyByRack.get(currentRack);
+            this.main2proxyByRack = newMain2proxyByRack;
         }
     }
 
@@ -302,14 +410,7 @@ public class DefaultProduceRouter implements ProduceRouter {
             AtomicInteger size = new AtomicInteger();
             Map<Node, List<Map.Entry<TopicPartition, MemoryRecords>>> node2Entries = new HashMap<>();
             entriesPerPartition.forEach((tp, records) -> {
-                Option<Node> nodeOpt = metadataCache
-                    .getPartitionLeaderEndpoint(tp.topic(), tp.partition(), kafkaConfig.interBrokerListenerName());
-                Node node;
-                if (nodeOpt.isEmpty()) {
-                    node = currentNode();
-                } else {
-                    node = nodeOpt.get();
-                }
+                Node node = mapping.getRouteOutNode(tp.topic(), tp.partition());
                 node2Entries.compute(node, (n, list) -> {
                     if (list == null) {
                         list = new ArrayList<>();

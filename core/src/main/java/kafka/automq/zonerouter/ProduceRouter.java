@@ -12,8 +12,10 @@
 package kafka.automq.zonerouter;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.RecordValidationStats;
@@ -24,7 +26,7 @@ public interface ProduceRouter {
 
     void handleProduceAppend(
         short apiVersion,
-        String clientId,
+        ClientIdMetadata clientId,
         int timeout,
         short requiredAcks,
         boolean internalTopicsAllowed,
@@ -35,5 +37,7 @@ public interface ProduceRouter {
     );
 
     CompletableFuture<AutomqZoneRouterResponse> handleZoneRouterRequest(byte[] metadata);
+
+    Optional<Node> getLeaderNode(TopicPartition topicPartition, ClientIdMetadata clientId, String listenerName);
 
 }
