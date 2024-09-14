@@ -40,6 +40,7 @@ import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.message.AutomqZoneRouterRequestData;
 import org.apache.kafka.common.message.AutomqZoneRouterResponseData;
+import org.apache.kafka.common.message.MetadataResponseData;
 import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.message.ProduceResponseData;
 import org.apache.kafka.common.protocol.Errors;
@@ -136,9 +137,15 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
     }
 
     @Override
-    public Optional<Node> getLeaderNode(TopicPartition topicPartition, ClientIdMetadata clientId,
+    public List<MetadataResponseData.MetadataResponseTopic> handleMetadataResponse(String clientId,
+        List<MetadataResponseData.MetadataResponseTopic> topics) {
+        return mapping.handleMetadataResponse(clientId, topics);
+    }
+
+    @Override
+    public Optional<Node> getLeaderNode(String topicName, int partitionId, ClientIdMetadata clientId,
         String listenerName) {
-        return mapping.getLeaderNode(topicPartition, clientId, listenerName);
+        return mapping.getLeaderNode(topicName, partitionId, clientId, listenerName);
     }
 
     private Node currentNode() {
@@ -198,9 +205,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             }
         }
 
-        public Optional<Node> getLeaderNode(TopicPartition topicPartition, ClientIdMetadata clientId,
+        public Optional<Node> getLeaderNode(String topicName, int partitionId, ClientIdMetadata clientId,
             String listenerName) {
-            BrokerRegistration target = metadataCache.getPartitionLeaderNode(topicPartition.topic(), topicPartition.partition());
+            BrokerRegistration target = metadataCache.getPartitionLeaderNode(topicName, partitionId);
             if (target == null) {
                 return Optional.empty();
             }
@@ -219,6 +226,37 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
                 return target.node(listenerName);
             }
             return proxy.node(listenerName);
+        }
+
+        public List<MetadataResponseData.MetadataResponseTopic> handleMetadataResponse(String clientId,
+            List<MetadataResponseData.MetadataResponseTopic> topics) {
+            ClientIdMetadata clientIdMetadata = ClientIdMetadata.of(clientId);
+            String clientRack = clientIdMetadata.rack();
+            if (clientRack == null) {
+                return topics;
+            }
+            Map<Integer, BrokerRegistration> clientRackMain2proxy = main2proxyByRack.get(clientRack);
+            if (clientRackMain2proxy == null) {
+                // Cluster doesn't cover the client rack
+                return topics;
+            }
+            topics.forEach(metadataResponseTopic -> {
+                metadataResponseTopic.partitions().forEach(metadataResponsePartition -> {
+                    int mainLeaderId = metadataResponsePartition.leaderId();
+                    if (mainLeaderId != -1) {
+                        BrokerRegistration proxy = clientRackMain2proxy.get(mainLeaderId);
+                        if (proxy != null) {
+                            int proxyLeaderId = proxy.id();
+                            if (proxyLeaderId != mainLeaderId) {
+                                metadataResponsePartition.setLeaderId(proxyLeaderId);
+                                metadataResponsePartition.setIsrNodes(List.of(proxyLeaderId));
+                                metadataResponsePartition.setReplicaNodes(List.of(proxyLeaderId));
+                            }
+                        }
+                    }
+                });
+            });
+            return topics;
         }
 
         @Override

@@ -1416,6 +1416,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     val clientId = request.header.clientId()
+    val listenerName = request.context.listenerName.value()
     requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs =>
        MetadataResponse.prepareResponse(
          requestVersion,
@@ -1423,7 +1424,7 @@ class KafkaApis(val requestChannel: RequestChannel,
          brokers.toList.asJava,
          clusterId,
          controllerId.getOrElse(MetadataResponse.NO_CONTROLLER_ID),
-         metadataTopicsInterceptor(clientId, completeTopicMetadata.asJava),
+         metadataTopicsInterceptor(clientId, listenerName, completeTopicMetadata.asJava),
          clusterAuthorizedOperations
       ))
   }
@@ -3957,7 +3958,7 @@ class KafkaApis(val requestChannel: RequestChannel,
   }
 
   // AutoMQ inject start
-  protected def metadataTopicsInterceptor(clientId: String, topics: util.List[MetadataResponseData.MetadataResponseTopic]): util.List[MetadataResponseData.MetadataResponseTopic] = {
+  protected def metadataTopicsInterceptor(clientId: String, listenerName: String, topics: util.List[MetadataResponseData.MetadataResponseTopic]): util.List[MetadataResponseData.MetadataResponseTopic] = {
     topics
   }
   // AutoMQ inject start

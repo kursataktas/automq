@@ -210,7 +210,7 @@ class ElasticKafkaApis(
           case None => (-1, -1)
         }
     }
-    LeaderNode(leaderId, leaderEpoch, OptionConverters.toScala(produceRouter.getLeaderNode(tp, clientIdMetadata, ln.value())))
+    LeaderNode(leaderId, leaderEpoch, OptionConverters.toScala(produceRouter.getLeaderNode(tp.topic(), tp.partition(), clientIdMetadata, ln.value())))
   }
 
   /**
@@ -789,8 +789,8 @@ class ElasticKafkaApis(
     listOffsetHandleExecutor.execute(() => super.handleListOffsetRequest(request))
   }
 
-  override protected def metadataTopicsInterceptor(clientId: String, topics: util.List[MetadataResponseData.MetadataResponseTopic]): util.List[MetadataResponseData.MetadataResponseTopic] = {
-    topics
+  override protected def metadataTopicsInterceptor(clientId: String, listenerName: String, topics: util.List[MetadataResponseData.MetadataResponseTopic]): util.List[MetadataResponseData.MetadataResponseTopic] = {
+    produceRouter.handleMetadataResponse(clientId, topics)
   }
 
 }
