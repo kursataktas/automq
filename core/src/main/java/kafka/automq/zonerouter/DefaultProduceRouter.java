@@ -203,10 +203,6 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                         return Node.noNode();
                     }
                 } else {
-                    target = main2proxy.get(target.id());
-                    if (target == null) {
-                        return Node.noNode();
-                    }
                     return target.node(interBrokerListenerName).orElse(Node.noNode());
                 }
             } else {
@@ -274,13 +270,18 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             }
             // categorize the brokers by rack
             Map<String, List<BrokerRegistration>> rack2brokers = new HashMap<>();
-            image.cluster().brokers().forEach((nodeId, node) -> rack2brokers.compute(node.rack().orElse(NOOP_RACK), (rack, list) -> {
-                if (list == null) {
-                    list = new ArrayList<>();
+            image.cluster().brokers().forEach((nodeId, node) -> {
+                if (node.fenced()) {
+                    return;
                 }
-                list.add(node);
-                return list;
-            }));
+                rack2brokers.compute(node.rack().orElse(NOOP_RACK), (rack, list) -> {
+                    if (list == null) {
+                        list = new ArrayList<>();
+                    }
+                    list.add(node);
+                    return list;
+                });
+            });
 
             rack2brokers.forEach((rack, brokers) -> brokers.sort(Comparator.comparingInt(BrokerRegistration::id)));
             Map<String, Map<Integer, BrokerRegistration>> newMain2proxyByRack = new HashMap<>();
@@ -602,13 +603,13 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             this.data = data;
             this.size = size;
             this.cf = new CompletableFuture<>();
+            this.topicPartitions = new ArrayList<>();
+            this.data.topicData().forEach(topicData -> topicData.partitionData().forEach(partitionData -> {
+                topicPartitions.add(new TopicPartition(topicData.name(), partitionData.index()));
+            }));
         }
 
         public void afterRouter() {
-            topicPartitions = new ArrayList<>();
-            data.topicData().forEach(topicData -> topicData.partitionData().forEach(partitionData -> {
-                topicPartitions.add(new TopicPartition(topicData.name(), partitionData.index()));
-            }));
             data = null; // gc the data
         }
 

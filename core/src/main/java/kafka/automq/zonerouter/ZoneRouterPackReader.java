@@ -36,7 +36,13 @@ public class ZoneRouterPackReader {
     public CompletableFuture<List<ZoneRouterProduceRequest>> readProduceRequests(Position position) {
         return objectStorage
             .rangeRead(new ObjectStorage.ReadOptions().bucket(bucketId), path, position.position(), position.position() + position.size())
-            .thenApply(ZoneRouterPackReader::decodeDataBlock);
+            .thenApply(buf -> {
+                try {
+                    return ZoneRouterPackReader.decodeDataBlock(buf);
+                } finally {
+                    buf.release();
+                }
+            });
     }
 
     static List<ZoneRouterProduceRequest> decodeDataBlock(ByteBuf buf) {
