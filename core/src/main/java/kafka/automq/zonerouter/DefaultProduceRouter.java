@@ -53,12 +53,13 @@ import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
-import org.apache.kafka.image.loader.MetadataListener;
+import org.apache.kafka.image.loader.LoaderManifest;
+import org.apache.kafka.image.publisher.MetadataPublisher;
 import org.apache.kafka.metadata.BrokerRegistration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
+public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
     private static final Logger LOGGER = LoggerFactory.getLogger(DefaultProduceRouter.class);
     private static final String NOOP_RACK = "";
     private final ScheduledExecutorService scheduler = Threads.newSingleThreadScheduledExecutor("router", true, LOGGER);
@@ -74,9 +75,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
     private int batchSizeThreshold = 4 * 1024 * 1024;
     private int batchIntervalMs = 100;
     private final Time time = Time.SYSTEM;
-    private final ProxyNodeMapping mapping = new ProxyNodeMapping();
-    private final RouterOut routerOut = new RouterOut();
-    private final RouterIn routerIn = new RouterIn();
+    private final ProxyNodeMapping mapping;
+    private final RouterOut routerOut;
+    private final RouterIn routerIn;
 
     public DefaultProduceRouter(ElasticKafkaApis kafkaApis, MetadataCache metadataCache, KafkaConfig kafkaConfig,
         ObjectStorage objectStorage) {
@@ -95,6 +96,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             throw new IllegalArgumentException("The node rack should be set when enable cross available zone router");
         }
         this.currentRack = kafkaConfig.rack().get();
+        this.mapping = new ProxyNodeMapping();
+        this.routerOut = new RouterOut();
+        this.routerIn = new RouterIn();
     }
 
     @Override
@@ -161,11 +165,16 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
     }
 
     @Override
-    public void onChange(MetadataDelta delta, MetadataImage image) {
-        mapping.onChange(delta, image);
+    public String name() {
+        return "CrossAzRouter";
     }
 
-    class ProxyNodeMapping implements MetadataListener {
+    @Override
+    public void onMetadataUpdate(MetadataDelta delta, MetadataImage newImage, LoaderManifest manifest) {
+        mapping.onChange(delta, newImage);
+    }
+
+    class ProxyNodeMapping {
         private volatile Map<Integer, BrokerRegistration> main2proxy = new HashMap<>();
         private volatile Map<String, Map<Integer, BrokerRegistration>> main2proxyByRack = new HashMap<>();
         private final String interBrokerListenerName;
@@ -259,7 +268,6 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataListener {
             return topics;
         }
 
-        @Override
         public void onChange(MetadataDelta delta, MetadataImage image) {
             if (delta.clusterDelta() == null || delta.clusterDelta().changedBrokers().isEmpty()) {
                 return;

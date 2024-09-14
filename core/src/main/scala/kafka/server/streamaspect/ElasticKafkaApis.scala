@@ -1,9 +1,8 @@
 package kafka.server.streamaspect
 
 import com.automq.stream.s3.metrics.TimerUtil
-import com.automq.stream.s3.operator.{BucketURI, ObjectStorageFactory}
 import com.yammer.metrics.core.Histogram
-import kafka.automq.zonerouter.{ClientIdMetadata, DefaultProduceRouter}
+import kafka.automq.zonerouter.{ClientIdMetadata, NoopProduceRouter, ProduceRouter}
 import kafka.coordinator.transaction.TransactionCoordinator
 import kafka.log.streamaspect.ElasticLogManager
 import kafka.metrics.KafkaMetricsUtil
@@ -18,7 +17,6 @@ import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
 import org.apache.kafka.common.acl.AclOperation.{CLUSTER_ACTION, READ, WRITE}
 import org.apache.kafka.common.errors.{ApiException, UnsupportedCompressionTypeException}
 import org.apache.kafka.common.internals.FatalExitError
-import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic
 import org.apache.kafka.common.message.{DeleteTopicsRequestData, FetchResponseData, MetadataResponseData}
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.network.{ListenerName, NetworkSend, Send}
@@ -28,7 +26,7 @@ import org.apache.kafka.common.replica.ClientMetadata
 import org.apache.kafka.common.replica.ClientMetadata.DefaultClientMetadata
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.common.requests.s3.AutomqZoneRouterRequest
-import org.apache.kafka.common.requests.{AbstractResponse, DeleteTopicsRequest, DeleteTopicsResponse, FetchRequest, FetchResponse, MetadataResponse, ProduceRequest, ProduceResponse, RequestUtils}
+import org.apache.kafka.common.requests.{AbstractResponse, DeleteTopicsRequest, DeleteTopicsResponse, FetchRequest, FetchResponse, ProduceRequest, ProduceResponse, RequestUtils}
 import org.apache.kafka.common.resource.Resource.CLUSTER_NAME
 import org.apache.kafka.common.resource.ResourceType.{CLUSTER, TOPIC, TRANSACTIONAL_ID}
 import org.apache.kafka.common.utils.{ThreadUtils, Time}
@@ -83,6 +81,8 @@ class ElasticKafkaApis(
 ) extends KafkaApis(requestChannel, metadataSupport, replicaManager, groupCoordinator, txnCoordinator,
   autoTopicCreationManager, brokerId, config, configRepository, metadataCache, metrics, authorizer, quotas,
   fetchManager, brokerTopicStats, clusterId, time, tokenManager, apiVersionManager, clientMetricsManager) {
+
+  private var produceRouter: ProduceRouter = new NoopProduceRouter(this, metadataCache)
 
   /**
    * Generate a map of topic -> [(partitionId, epochId)] based on provided topicsRequestData.
@@ -406,8 +406,6 @@ class ElasticKafkaApis(
       // TODO: isolate to a separate thread pool to avoid blocking io thread. Connection should be bind to certain async thread to keep the order
     }
   }
-
-  val produceRouter = new DefaultProduceRouter(this, metadataCache, config, ObjectStorageFactory.instance().builder(BucketURI.parse("0@s3://ko3?region=us-east-1&endpoint=http://127.0.0.1:4566")).build())
 
   def handleZoneRouterRequest(request: RequestChannel.Request, requestLocal: RequestLocal): Unit = {
     val zoneRouterRequest = request.body[AutomqZoneRouterRequest]
@@ -791,6 +789,10 @@ class ElasticKafkaApis(
 
   override protected def metadataTopicsInterceptor(clientId: String, listenerName: String, topics: util.List[MetadataResponseData.MetadataResponseTopic]): util.List[MetadataResponseData.MetadataResponseTopic] = {
     produceRouter.handleMetadataResponse(clientId, topics)
+  }
+
+  def setProduceRouter(produceRouter: ProduceRouter): Unit = {
+    this.produceRouter = produceRouter
   }
 
 }
