@@ -406,6 +406,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                 .thenCompose(nil -> prevLastRouterCf)
                 .thenAccept(nil -> {
                     LOGGER.info("write s3 objectId={}", objectId);
+                    List<CompletableFuture<Void>> sendCfList = new ArrayList<>();
                     node2position.forEach((node, position) -> {
                         RouterRecord routerRecord = new RouterRecord(kafkaConfig.nodeId(), (short) 0, objectId, position.position(), position.size());
 
@@ -413,7 +414,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                             new AutomqZoneRouterRequestData().setMetadata(routerRecord.encode().array())
                         );
                         List<ProxyRequest> proxyRequests = node2requests.get(node);
-                        asyncSender.sendRequest(node, builder).thenAccept(clientResponse -> {
+                        CompletableFuture<Void> sendCf = asyncSender.sendRequest(node, builder).thenAccept(clientResponse -> {
                             LOGGER.info("receive router response={}", clientResponse);
                             if (!clientResponse.hasResponse()) {
                                 LOGGER.error("has no response cause by other error");
@@ -425,6 +426,14 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                         }).exceptionally(ex -> {
                             // TODO: callback the error
                             LOGGER.error("[UNEXPECTED]", ex);
+                            return null;
+                        });
+                        sendCfList.add(sendCf);
+                    });
+                    CompletableFuture.allOf(sendCfList.toArray(new CompletableFuture[0])).whenComplete((nil2, ex) -> {
+                        ObjectStorage.ObjectPath path = writer.objectPath();
+                        objectStorage.delete(List.of(path)).exceptionally(ex2 -> {
+                            LOGGER.error("delete {} fail", path, ex);
                             return null;
                         });
                     });

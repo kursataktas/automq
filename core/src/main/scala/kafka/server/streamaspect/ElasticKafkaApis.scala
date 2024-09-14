@@ -411,6 +411,9 @@ class ElasticKafkaApis(
     val zoneRouterRequest = request.body[AutomqZoneRouterRequest]
     produceRouter.handleZoneRouterRequest(zoneRouterRequest.data().metadata()).thenAccept(response => {
       requestChannel.sendResponse(request, response, None)
+    }).exceptionally(ex => {
+      handleError(request, ex)
+      null
     })
   }
 

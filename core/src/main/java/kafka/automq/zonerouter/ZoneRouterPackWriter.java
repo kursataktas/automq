@@ -50,6 +50,10 @@ public class ZoneRouterPackWriter {
         return writer.bucketId();
     }
 
+    public ObjectStorage.ObjectPath objectPath() {
+        return new ObjectStorage.ObjectPath(bucketId(), path);
+    }
+
     public CompletableFuture<Void> close() {
         ByteBuf footer = ByteBufAlloc.byteBuffer(FOOTER_SIZE);
         footer.writeZero(40);

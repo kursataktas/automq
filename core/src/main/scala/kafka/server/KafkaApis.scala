@@ -3961,6 +3961,12 @@ class KafkaApis(val requestChannel: RequestChannel,
   protected def metadataTopicsInterceptor(clientId: String, listenerName: String, topics: util.List[MetadataResponseData.MetadataResponseTopic]): util.List[MetadataResponseData.MetadataResponseTopic] = {
     topics
   }
+
+  def handleError(request: RequestChannel.Request, e: Throwable): Unit = {
+    error(s"Unexpected error handling request ${request.requestDesc(true)} " +
+      s"with context ${request.context}", e)
+    requestHelper.handleError(request, e)
+  }
   // AutoMQ inject start
 
 }
