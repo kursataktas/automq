@@ -18,7 +18,8 @@ import org.apache.kafka.common.{Node, TopicIdPartition, TopicPartition, Uuid}
 import org.apache.kafka.common.acl.AclOperation.{CLUSTER_ACTION, READ, WRITE}
 import org.apache.kafka.common.errors.{ApiException, UnsupportedCompressionTypeException}
 import org.apache.kafka.common.internals.FatalExitError
-import org.apache.kafka.common.message.{DeleteTopicsRequestData, FetchResponseData}
+import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic
+import org.apache.kafka.common.message.{DeleteTopicsRequestData, FetchResponseData, MetadataResponseData}
 import org.apache.kafka.common.metrics.Metrics
 import org.apache.kafka.common.network.{ListenerName, NetworkSend, Send}
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
@@ -27,7 +28,7 @@ import org.apache.kafka.common.replica.ClientMetadata
 import org.apache.kafka.common.replica.ClientMetadata.DefaultClientMetadata
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.common.requests.s3.AutomqZoneRouterRequest
-import org.apache.kafka.common.requests.{AbstractResponse, DeleteTopicsRequest, DeleteTopicsResponse, FetchRequest, FetchResponse, ProduceRequest, ProduceResponse, RequestUtils}
+import org.apache.kafka.common.requests.{AbstractResponse, DeleteTopicsRequest, DeleteTopicsResponse, FetchRequest, FetchResponse, MetadataResponse, ProduceRequest, ProduceResponse, RequestUtils}
 import org.apache.kafka.common.resource.Resource.CLUSTER_NAME
 import org.apache.kafka.common.resource.ResourceType.{CLUSTER, TOPIC, TRANSACTIONAL_ID}
 import org.apache.kafka.common.utils.{ThreadUtils, Time}
@@ -787,4 +788,9 @@ class ElasticKafkaApis(
     // isolate to a separate thread pool to avoid blocking io thread (PRODUCE use io thread).
     listOffsetHandleExecutor.execute(() => super.handleListOffsetRequest(request))
   }
+
+  override protected def metadataTopicsInterceptor(clientId: String, topics: util.List[MetadataResponseData.MetadataResponseTopic]): util.List[MetadataResponseData.MetadataResponseTopic] = {
+    topics
+  }
+
 }
