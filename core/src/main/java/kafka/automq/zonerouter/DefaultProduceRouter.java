@@ -389,9 +389,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             Integer hash = clientIdMetadata.clientId().hashCode();
             return perfModeRouterMap.compute(hash, (k, v) -> {
                 int index = perfRouterIndex.getAndIncrement();
-                boolean isRoute = (index % 3 != 0);
-                perfModeRouterMap.put(hash, isRoute);
-                return isRoute;
+                return index % 3 != 0;
             });
         }
 

@@ -17,7 +17,7 @@
 
 package kafka.server
 
-import com.automq.stream.s3.operator.{BucketURI, ObjectStorageFactory}
+import com.automq.stream.s3.operator.ObjectStorageFactory
 import kafka.automq.zonerouter.DefaultProduceRouter
 import kafka.cluster.EndPoint
 import kafka.coordinator.group.{CoordinatorLoaderImpl, CoordinatorPartitionWriter, GroupCoordinatorAdapter}
@@ -442,7 +442,7 @@ class BrokerServer(
         apiVersionManager = apiVersionManager,
         clientMetricsManager = Some(clientMetricsManager))
 
-      val objectStorage = ObjectStorageFactory.instance().builder(BucketURI.parse("0@s3://ko3?region=us-east-1&endpoint=http://127.0.0.1:4566")).build()
+      val objectStorage = ObjectStorageFactory.instance().builder(config.automq.dataBuckets().get(0)).build()
       val produceRouter = new DefaultProduceRouter(dataPlaneRequestProcessor.asInstanceOf[ElasticKafkaApis], metadataCache, config, objectStorage)
       metadataLoader.installPublishers(util.List.of(produceRouter))
       dataPlaneRequestProcessor.asInstanceOf[ElasticKafkaApis].setProduceRouter(produceRouter)
