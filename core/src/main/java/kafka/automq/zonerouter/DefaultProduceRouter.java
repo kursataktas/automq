@@ -12,6 +12,7 @@
 package kafka.automq.zonerouter;
 
 import com.automq.stream.s3.operator.ObjectStorage;
+import com.automq.stream.utils.Systems;
 import com.automq.stream.utils.Threads;
 import io.netty.buffer.Unpooled;
 import java.util.ArrayList;
@@ -25,6 +26,7 @@ import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -73,8 +75,8 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
     private volatile Node node;
     private final String currentRack;
     private final int currentNodeId;
-    private int batchSizeThreshold = 4 * 1024 * 1024;
-    private int batchIntervalMs = 100;
+    private final int batchSizeThreshold = Systems.getEnvInt("AUTOMQ_MULTI_WRITE_BATCH_SIZE", 4 * 1024 * 1024);
+    private final int batchIntervalMs = Systems.getEnvInt("AUTOMQ_MULTI_WRITE_BATCH_INTERVAL", 100);
     private final Time time = Time.SYSTEM;
     private final ProxyNodeMapping mapping;
     private final RouterOut routerOut;
@@ -314,9 +316,10 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
         private CompletableFuture<Void> lastRouterCf = CompletableFuture.completedFuture(null);
         private final AtomicInteger batchSize = new AtomicInteger();
         private long lastUploadTimestamp = 0;
-        private final boolean perfMode = true; // force route 2 / 3 traffic
-        private final Map<Integer, Boolean> perfModeRouterMap = new ConcurrentHashMap<>();
-        private final AtomicInteger perfRouterIndex = new AtomicInteger();
+        private final boolean perfMode = Systems.getEnvBool("AUTOMQ_PERF_MODE", true); // force route 2 / 3 traffic
+//        private final Map<Integer, Boolean> perfModeRouterMap = new ConcurrentHashMap<>();
+//        private final int routeBase = Systems.getEnvInt("AUTOMQ_PERF_MODE_ROUTE_BASE", 3);
+//        private final AtomicInteger perfRouterIndex = new AtomicInteger();
 
         public RouterOut() {
             scheduler.scheduleWithFixedDelay(this::proxy0, batchIntervalMs, batchIntervalMs, TimeUnit.MILLISECONDS);
@@ -354,7 +357,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                     request.completeWithNotLeaderNotFollower();
                     return;
                 }
-                if (node.id() == currentNodeId && (perfMode && isRouteInPerfMode(clientId))) {
+                if (node.id() == currentNodeId && !perfMode) {
                     // TODO: submit to another thread
                     kafkaApis.handleProduceAppendJavaCompatible(
                         timeout, requiredAcks, internalTopicsAllowed, transactionId,
@@ -385,13 +388,18 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             }
         }
 
-        private boolean isRouteInPerfMode(ClientIdMetadata clientIdMetadata) {
-            Integer hash = clientIdMetadata.clientId().hashCode();
-            return perfModeRouterMap.compute(hash, (k, v) -> {
-                int index = perfRouterIndex.getAndIncrement();
-                return index % 3 != 0;
-            });
-        }
+//        private boolean isRouteInPerfMode(ClientIdMetadata clientIdMetadata) {
+//            if (false) {
+//                // FIXME: 不能用 clientid 作为 hash key,
+//                Integer hash = clientIdMetadata.clientId().hashCode();
+//                return perfModeRouterMap.compute(hash, (k, v) -> {
+//                    int index = perfRouterIndex.getAndIncrement();
+//                    return index % routeBase != 0;
+//                });
+//            } else {
+//                return true;
+//            }
+//        }
 
         private void proxy0() {
             if (batchSize.get() < batchSizeThreshold && time.milliseconds() - batchIntervalMs < lastUploadTimestamp) {
@@ -569,18 +577,21 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
     }
 
     class RouterIn {
+        private CompletableFuture<Void> lastRouterCf = CompletableFuture.completedFuture(null);
+        private final ExecutorService executor = Threads.newFixedFastThreadLocalThreadPoolWithMonitor(1, "router-in", true, LOGGER);
 
-        public CompletableFuture<AutomqZoneRouterResponse> handleZoneRouterRequest(byte[] metadata) {
+        public synchronized CompletableFuture<AutomqZoneRouterResponse> handleZoneRouterRequest(byte[] metadata) {
             // TODO: handle any unexpected exception
             RouterRecord routerRecord = RouterRecord.decode(Unpooled.wrappedBuffer(metadata));
             if (LOGGER.isTraceEnabled()) {
                 LOGGER.trace("receive router request={}", routerRecord);
             }
-            // TODO: ensure the order
             CompletableFuture<List<ZoneRouterProduceRequest>> readCf = new ZoneRouterPackReader(routerRecord.nodeId(), routerRecord.bucketId(), routerRecord.objectId(), objectStorage)
                 .readProduceRequests(new Position(routerRecord.position(), routerRecord.size()));
+            CompletableFuture<Void> prevLastRouterCf = lastRouterCf;
             CompletableFuture<AutomqZoneRouterResponse> appendCf = readCf
-                .thenCompose(produces -> {
+                .thenCompose(rst -> prevLastRouterCf.thenApply(nil -> rst))
+                .thenComposeAsync(produces -> {
                     List<CompletableFuture<AutomqZoneRouterResponseData.Response>> cfList = new ArrayList<>();
                     produces.stream().map(this::append).forEach(cfList::add);
                     return CompletableFuture.allOf(cfList.toArray(new CompletableFuture[0])).thenApply(nil -> {
@@ -588,11 +599,13 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                         cfList.forEach(cf -> response.responses().add(cf.join()));
                         return new AutomqZoneRouterResponse(response);
                     });
+                }, executor);
+            this.lastRouterCf = appendCf
+                .thenAccept(rst -> {
+                }).exceptionally(ex -> {
+                    LOGGER.error("[UNEXPECTED]", ex);
+                    return null;
                 });
-            appendCf.exceptionally(ex -> {
-                LOGGER.error("[UNEXPECTED]", ex);
-                return null;
-            });
             return appendCf;
         }
 
@@ -615,7 +628,6 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                 data.transactionalId(),
                 realEntriesPerPartition,
                 rst -> {
-                    // TODO: 在 router zone in 塞 node endpoint 信息
                     @SuppressWarnings("deprecation")
                     ProduceResponse produceResponse = new ProduceResponse(rst, 0, Collections.emptyList());
                     AutomqZoneRouterResponseData.Response response = new AutomqZoneRouterResponseData.Response()
