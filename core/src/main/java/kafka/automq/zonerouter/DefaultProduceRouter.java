@@ -317,9 +317,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
         private final AtomicInteger batchSize = new AtomicInteger();
         private long lastUploadTimestamp = 0;
         private final boolean perfMode = Systems.getEnvBool("AUTOMQ_PERF_MODE", true); // force route 2 / 3 traffic
-//        private final Map<Integer, Boolean> perfModeRouterMap = new ConcurrentHashMap<>();
-//        private final int routeBase = Systems.getEnvInt("AUTOMQ_PERF_MODE_ROUTE_BASE", 3);
-//        private final AtomicInteger perfRouterIndex = new AtomicInteger();
+        private final Map<Long, Boolean> perfModeRouterMap = new ConcurrentHashMap<>();
+        private final int routeBase = Systems.getEnvInt("AUTOMQ_PERF_MODE_ROUTE_BASE", 3);
+        private final AtomicInteger perfRouterIndex = new AtomicInteger();
 
         public RouterOut() {
             scheduler.scheduleWithFixedDelay(this::proxy0, batchIntervalMs, batchIntervalMs, TimeUnit.MILLISECONDS);
@@ -336,6 +336,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             Consumer<Map<TopicPartition, ProduceResponse.PartitionResponse>> responseCallback,
             Consumer<Map<TopicPartition, RecordValidationStats>> recordValidationStatsCallback
         ) {
+            entriesPerPartition.entrySet().iterator().next().getValue().batches().iterator().next().producerId();
             short flag = new Flag().internalTopicsAllowed(internalTopicsAllowed).value();
             Map<Node, ProxyRequest> requests = split(apiVersion, clientId, timeout, flag, requiredAcks, transactionId, entriesPerPartition);
             Map<TopicPartition, ProduceResponse.PartitionResponse> rst = new ConcurrentHashMap<>();
@@ -352,12 +353,13 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                     ).toArray(CompletableFuture[]::new)
             ).thenAccept(nil -> responseCallback.accept(rst));
 
+            boolean forceRoute = perfMode && isRouteInPerfMode(entriesPerPartition);
             requests.forEach((node, request) -> {
                 if (node.id() == Node.noNode().id()) {
                     request.completeWithNotLeaderNotFollower();
                     return;
                 }
-                if (node.id() == currentNodeId && !perfMode) {
+                if (node.id() == currentNodeId && !forceRoute) {
                     // TODO: submit to another thread
                     kafkaApis.handleProduceAppendJavaCompatible(
                         timeout, requiredAcks, internalTopicsAllowed, transactionId,
@@ -388,18 +390,13 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             }
         }
 
-//        private boolean isRouteInPerfMode(ClientIdMetadata clientIdMetadata) {
-//            if (false) {
-//                // FIXME: 不能用 clientid 作为 hash key,
-//                Integer hash = clientIdMetadata.clientId().hashCode();
-//                return perfModeRouterMap.compute(hash, (k, v) -> {
-//                    int index = perfRouterIndex.getAndIncrement();
-//                    return index % routeBase != 0;
-//                });
-//            } else {
-//                return true;
-//            }
-//        }
+        private boolean isRouteInPerfMode(Map<TopicPartition, MemoryRecords> entriesPerPartition) {
+            long producerId = entriesPerPartition.entrySet().iterator().next().getValue().batches().iterator().next().producerId();
+            return perfModeRouterMap.computeIfAbsent(producerId, k -> {
+                int index = perfRouterIndex.getAndIncrement();
+                return index % routeBase != 0;
+            });
+        }
 
         private void proxy0() {
             if (batchSize.get() < batchSizeThreshold && time.milliseconds() - batchIntervalMs < lastUploadTimestamp) {
@@ -588,6 +585,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             }
             CompletableFuture<List<ZoneRouterProduceRequest>> readCf = new ZoneRouterPackReader(routerRecord.nodeId(), routerRecord.bucketId(), routerRecord.objectId(), objectStorage)
                 .readProduceRequests(new Position(routerRecord.position(), routerRecord.size()));
+            // Orderly handle the request
             CompletableFuture<Void> prevLastRouterCf = lastRouterCf;
             CompletableFuture<AutomqZoneRouterResponse> appendCf = readCf
                 .thenCompose(rst -> prevLastRouterCf.thenApply(nil -> rst))
