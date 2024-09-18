@@ -378,7 +378,6 @@ class ElasticKafkaApis(
       val internalTopicsAllowed = request.header.clientId == AdminUtils.ADMIN_CLIENT_ID
 
       def sendResponseCallbackJava(rst: util.Map[TopicPartition, PartitionResponse]): Unit = {
-        info(s"sendResponseCallbackJava $rst")
         sendResponseCallback(rst.asScala)
       }
 

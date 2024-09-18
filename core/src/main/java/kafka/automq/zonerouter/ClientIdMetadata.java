@@ -16,9 +16,11 @@ import java.util.List;
 import java.util.Map;
 
 public class ClientIdMetadata {
+    private final String clientId;
     private final Map<String, List<String>> metadata;
 
     private ClientIdMetadata(String clientId) {
+        this.clientId = clientId;
         this.metadata = URIUtils.splitQuery(clientId);
     }
 
@@ -32,6 +34,10 @@ public class ClientIdMetadata {
             return null;
         }
         return list.get(0);
+    }
+
+    public String clientId() {
+        return clientId;
     }
 
 }

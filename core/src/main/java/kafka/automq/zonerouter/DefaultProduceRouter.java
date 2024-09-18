@@ -72,6 +72,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
     private final AtomicLong nextObjectId = new AtomicLong();
     private volatile Node node;
     private final String currentRack;
+    private final int currentNodeId;
     private int batchSizeThreshold = 4 * 1024 * 1024;
     private int batchIntervalMs = 100;
     private final Time time = Time.SYSTEM;
@@ -96,6 +97,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             throw new IllegalArgumentException("The node rack should be set when enable cross available zone router");
         }
         this.currentRack = kafkaConfig.rack().get();
+        this.currentNodeId = kafkaConfig.nodeId();
         this.mapping = new ProxyNodeMapping();
         this.routerOut = new RouterOut();
         this.routerIn = new RouterIn();
@@ -312,6 +314,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
         private CompletableFuture<Void> lastRouterCf = CompletableFuture.completedFuture(null);
         private final AtomicInteger batchSize = new AtomicInteger();
         private long lastUploadTimestamp = 0;
+        private final boolean perfMode = true; // force route 2 / 3 traffic
+        private final Map<Integer, Boolean> perfModeRouterMap = new ConcurrentHashMap<>();
+        private final AtomicInteger perfRouterIndex = new AtomicInteger();
 
         public RouterOut() {
             scheduler.scheduleWithFixedDelay(this::proxy0, batchIntervalMs, batchIntervalMs, TimeUnit.MILLISECONDS);
@@ -349,19 +354,45 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                     request.completeWithNotLeaderNotFollower();
                     return;
                 }
-                // TODO: if the node is current node, then handle it directly
-                pendingRequests.compute(node, (n, queue) -> {
-                    if (queue == null) {
-                        queue = new LinkedBlockingQueue<>();
-                    }
-                    queue.add(request);
-                    batchSize.addAndGet(request.size);
-                    return queue;
-                });
+                if (node.id() == currentNodeId && (perfMode && isRouteInPerfMode(clientId))) {
+                    // TODO: submit to another thread
+                    kafkaApis.handleProduceAppendJavaCompatible(
+                        timeout, requiredAcks, internalTopicsAllowed, transactionId,
+                        produceRequestToMap(request.data),
+                        responseCallbackRst -> {
+                            request.cf.complete(responseCallbackRst);
+                            return null;
+                        },
+                        recordValidationStatsCallbackRst -> {
+                            recordValidationStatsCallback.accept(recordValidationStatsCallbackRst);
+                            return null;
+                        },
+                        apiVersion
+                    );
+                } else {
+                    pendingRequests.compute(node, (n, queue) -> {
+                        if (queue == null) {
+                            queue = new LinkedBlockingQueue<>();
+                        }
+                        queue.add(request);
+                        batchSize.addAndGet(request.size);
+                        return queue;
+                    });
+                }
             });
             if (batchSize.get() >= batchSizeThreshold || time.milliseconds() - batchIntervalMs >= lastUploadTimestamp) {
                 scheduler.submit(this::proxy0);
             }
+        }
+
+        private boolean isRouteInPerfMode(ClientIdMetadata clientIdMetadata) {
+            Integer hash = clientIdMetadata.clientId().hashCode();
+            return perfModeRouterMap.compute(hash, (k, v) -> {
+                int index = perfRouterIndex.getAndIncrement();
+                boolean isRoute = (index % 3 != 0);
+                perfModeRouterMap.put(hash, isRoute);
+                return isRoute;
+            });
         }
 
         private void proxy0() {
@@ -384,7 +415,6 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             }
 
             long objectId = nextObjectId.incrementAndGet();
-            LOGGER.info("try write s3 objectId={}", objectId);
             ZoneRouterPackWriter writer = new ZoneRouterPackWriter(kafkaConfig.nodeId(), objectId, objectStorage);
             Map<Node, Position> node2position = new HashMap<>();
             node2requests.forEach((node, requests) -> {
@@ -405,7 +435,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                 // Orderly send the router request.
                 .thenCompose(nil -> prevLastRouterCf)
                 .thenAccept(nil -> {
-                    LOGGER.info("write s3 objectId={}", objectId);
+                    if (LOGGER.isTraceEnabled()) {
+                        LOGGER.trace("write s3 objectId={}", objectId);
+                    }
                     List<CompletableFuture<Void>> sendCfList = new ArrayList<>();
                     node2position.forEach((node, position) -> {
                         RouterRecord routerRecord = new RouterRecord(kafkaConfig.nodeId(), (short) 0, objectId, position.position(), position.size());
@@ -415,7 +447,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                         );
                         List<ProxyRequest> proxyRequests = node2requests.get(node);
                         CompletableFuture<Void> sendCf = asyncSender.sendRequest(node, builder).thenAccept(clientResponse -> {
-                            LOGGER.info("receive router response={}", clientResponse);
+                            if (LOGGER.isTraceEnabled()) {
+                                LOGGER.trace("receive router response={}", clientResponse);
+                            }
                             if (!clientResponse.hasResponse()) {
                                 LOGGER.error("has no response cause by other error");
                                 // TODO: callback the error
@@ -472,6 +506,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             }
         }
 
+        /**
+         * Split the produce request to different nodes
+         */
         private Map<Node, ProxyRequest> split(
             short apiVersion,
             ClientIdMetadata clientId,
@@ -481,7 +518,6 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             String transactionId,
             Map<TopicPartition, MemoryRecords> entriesPerPartition
         ) {
-            AtomicInteger size = new AtomicInteger();
             Map<Node, List<Map.Entry<TopicPartition, MemoryRecords>>> node2Entries = new HashMap<>();
             entriesPerPartition.forEach((tp, records) -> {
                 Node node = mapping.getRouteOutNode(tp.topic(), tp.partition(), clientId);
@@ -489,13 +525,13 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                     if (list == null) {
                         list = new ArrayList<>();
                     }
-                    size.addAndGet(records.sizeInBytes());
                     list.add(Map.entry(tp, records));
                     return list;
                 });
             });
             Map<Node, ProxyRequest> rst = new HashMap<>();
             node2Entries.forEach((node, entries) -> {
+                AtomicInteger size = new AtomicInteger();
                 ProduceRequestData data = new ProduceRequestData();
                 data.setTransactionalId(transactionId);
                 data.setAcks(requiredAcks);
@@ -510,6 +546,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                             map = new HashMap<>();
                         }
                         map.put(tp.partition(), records);
+                        size.addAndGet(records.sizeInBytes());
                         return map;
                     });
                 });
@@ -538,7 +575,9 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
         public CompletableFuture<AutomqZoneRouterResponse> handleZoneRouterRequest(byte[] metadata) {
             // TODO: handle any unexpected exception
             RouterRecord routerRecord = RouterRecord.decode(Unpooled.wrappedBuffer(metadata));
-            LOGGER.info("receive router request={}", routerRecord);
+            if (LOGGER.isTraceEnabled()) {
+                LOGGER.trace("receive router request={}", routerRecord);
+            }
             // TODO: ensure the order
             CompletableFuture<List<ZoneRouterProduceRequest>> readCf = new ZoneRouterPackReader(routerRecord.nodeId(), routerRecord.bucketId(), routerRecord.objectId(), objectStorage)
                 .readProduceRequests(new Position(routerRecord.position(), routerRecord.size()));
@@ -563,17 +602,12 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             ZoneRouterProduceRequest zoneRouterProduceRequest) {
             Flag flag = new Flag(zoneRouterProduceRequest.flag());
             ProduceRequestData data = zoneRouterProduceRequest.data();
-            LOGGER.info("read zone router request from s3, data={}", data);
+            if (LOGGER.isTraceEnabled()) {
+                LOGGER.trace("read zone router request from s3, data={}", data);
+            }
+
+            Map<TopicPartition, MemoryRecords> realEntriesPerPartition = produceRequestToMap(data);
             short apiVersion = zoneRouterProduceRequest.apiVersion();
-
-            Map<TopicPartition, MemoryRecords> realEntriesPerPartition = new HashMap<>();
-            data.topicData().forEach(topicData ->
-                topicData.partitionData().forEach(partitionData ->
-                    realEntriesPerPartition.put(
-                        new TopicPartition(topicData.name(), partitionData.index()),
-                        (MemoryRecords) partitionData.records()
-                    )));
-
             CompletableFuture<AutomqZoneRouterResponseData.Response> cf = new CompletableFuture<>();
             // TODO: parallel request for different partitions
             kafkaApis.handleProduceAppendJavaCompatible(
@@ -596,6 +630,17 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
             );
             return cf;
         }
+    }
+
+    static Map<TopicPartition, MemoryRecords> produceRequestToMap(ProduceRequestData data) {
+        Map<TopicPartition, MemoryRecords> realEntriesPerPartition = new HashMap<>();
+        data.topicData().forEach(topicData ->
+            topicData.partitionData().forEach(partitionData ->
+                realEntriesPerPartition.put(
+                    new TopicPartition(topicData.name(), partitionData.index()),
+                    (MemoryRecords) partitionData.records()
+                )));
+        return realEntriesPerPartition;
     }
 
     static class ProxyRequest {
