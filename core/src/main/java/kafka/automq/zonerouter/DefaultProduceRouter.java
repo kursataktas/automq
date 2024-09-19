@@ -393,7 +393,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
         private boolean isRouteInPerfMode(Map<TopicPartition, MemoryRecords> entriesPerPartition) {
             long producerId = entriesPerPartition.entrySet().iterator().next().getValue().batches().iterator().next().producerId();
             return perfModeRouterMap.computeIfAbsent(producerId, k -> {
-                int index = perfRouterIndex.getAndIncrement();
+                int index = perfRouterIndex.incrementAndGet();
                 return index % routeBase != 0;
             });
         }
@@ -441,6 +441,7 @@ public class DefaultProduceRouter implements ProduceRouter, MetadataPublisher {
                     if (LOGGER.isTraceEnabled()) {
                         LOGGER.trace("write s3 objectId={}", objectId);
                     }
+                    // TODO: in / out metrics and type (要经过限流器 + 另外一个 type 类型统计)
                     List<CompletableFuture<Void>> sendCfList = new ArrayList<>();
                     node2position.forEach((node, position) -> {
                         RouterRecord routerRecord = new RouterRecord(kafkaConfig.nodeId(), (short) 0, objectId, position.position(), position.size());
