@@ -35,7 +35,7 @@ public class ZoneRouterPackWriter {
     public ZoneRouterPackWriter(int nodeId, long objectId, ObjectStorage objectStorage) {
         this.path = genObjectPath(nodeId, objectId);
         this.dataBuf = ByteBufAlloc.compositeByteBuffer();
-        this.writer = objectStorage.writer(new ObjectStorage.WriteOptions(), path);
+        this.writer = objectStorage.writer(new ObjectStorage.WriteOptions().enableFastRetry(true), path);
     }
 
     public Position addProduceRequests(List<ZoneRouterProduceRequest> produceRequests) {
