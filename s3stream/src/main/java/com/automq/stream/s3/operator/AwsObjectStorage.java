@@ -38,6 +38,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.ssl.OpenSsl;
+import io.netty.util.ResourceLeakDetector;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
@@ -412,6 +413,9 @@ public class AwsObjectStorage extends AbstractObjectStorage {
         if (StringUtils.isNotBlank(endpoint)) {
             builder.endpointOverride(URI.create(endpoint));
         }
+        // FIXME: trigger SAMPLING_INTERVAL init
+        ResourceLeakDetector.isEnabled();
+
         if (!OpenSsl.isAvailable()) {
             LOGGER.warn("OpenSSL is not available, using JDK SSL provider, which may have performance issue.", OpenSsl.unavailabilityCause());
         }

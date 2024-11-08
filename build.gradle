@@ -929,6 +929,20 @@ project(':core') {
     implementation project(':server')
     implementation project(':automq-shell')
 
+    // table topic start
+    implementation 'software.amazon.awssdk:bundle:2.26.10'
+    implementation 'org.apache.avro:avro:1.11.4'
+    implementation 'org.apache.iceberg:iceberg-core:1.6.1'
+    implementation 'org.apache.iceberg:iceberg-api:1.6.1'
+    implementation 'org.apache.iceberg:iceberg-nessie:1.6.1'
+    implementation 'org.apache.iceberg:iceberg-data:1.6.1'
+    implementation 'org.apache.iceberg:iceberg-parquet:1.6.1'
+    implementation 'org.apache.iceberg:iceberg-common:1.6.1'
+    implementation 'org.apache.hadoop:hadoop-common:3.4.1'
+    implementation 'org.apache.hadoop:hadoop-aws:3.4.1'
+    // table topic end
+
+
     implementation libs.argparse4j
     implementation libs.commonsValidator
     implementation libs.jacksonDatabind

@@ -3,6 +3,7 @@ package kafka.server.streamaspect
 import com.automq.stream.api.exceptions.FastReadFailFastException
 import com.automq.stream.utils.FutureUtil
 import com.automq.stream.utils.threads.S3StreamThreadPoolMonitor
+import kafka.automq.table.TableManager
 import kafka.cluster.Partition
 import kafka.log.remote.RemoteLogManager
 import kafka.log.streamaspect.{ElasticLogManager, PartitionStatusTracker, ReadHint}
@@ -196,6 +197,7 @@ class ElasticReplicaManager(
         getPartition(topicPartition) match {
           case hostedPartition: HostedPartition.Online =>
             if (allPartitions.remove(topicPartition, hostedPartition)) {
+              notifyPartitionClose(hostedPartition.partition)
               brokerTopicStats.removeMetrics(topicPartition)
               maybeRemoveTopicMetrics(topicPartition.topic)
               // AutoMQ for Kafka inject start
@@ -1184,6 +1186,7 @@ class ElasticReplicaManager(
         val state = info.partition.toLeaderAndIsrPartitionState(tp, true)
         val partitionAssignedDirectoryId = directoryIds.find(_._1.topicPartition() == tp).map(_._2)
         partition.makeLeader(state, offsetCheckpoints, Some(info.topicId), partitionAssignedDirectoryId)
+        notifyPartitionOpen(partition)
       }).foreach { case (partition, _) =>
         try {
           changedPartitions.add(partition)
@@ -1383,4 +1386,20 @@ class ElasticReplicaManager(
       }
     }
   }
+
+  // table topic start
+//  private val partitionLifecycleListeners = new util.ArrayList[PartitionLifecycleListener]()()
+
+  private val tableManager = new TableManager()
+
+  private def notifyPartitionOpen(partition: Partition): Unit = {
+    tableManager.onOpen(partition)
+//    partitionLifecycleListeners.forEach(listener => CoreUtils.swallow(listener.onOpen(partition), this))
+  }
+
+  private def notifyPartitionClose(partition: Partition): Unit = {
+//    partitionLifecycleListeners.forEach(listener => CoreUtils.swallow(listener.onClose(partition), this))
+  }
+  // table topic end
+
 }
